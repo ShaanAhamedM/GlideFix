@@ -44,8 +44,8 @@ public final class SecurityAuditor {
 
     /// Scans process environment for any injected dynamic libraries or dyld overrides.
     public static func checkDyldEnvironmentSafety(env: [String: String] = ProcessInfo.processInfo.environment) -> Bool {
-        for (key, _) in env {
-            if key.hasPrefix("DYLD_") {
+        for (key, value) in env {
+            if key.hasPrefix("DYLD_") && !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 return false
             }
         }

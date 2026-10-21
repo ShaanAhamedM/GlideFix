@@ -2,6 +2,7 @@ import SwiftUI
 import GlideFixCore
 
 public struct MenuBarContentView: View {
+    @Environment(\.openWindow) private var openWindow
     @ObservedObject var settings: AppSettings = .shared
     @ObservedObject var accessibility: AccessibilityManager = .shared
     let eventTapManager: EventTapManager = .shared
@@ -33,6 +34,17 @@ public struct MenuBarContentView: View {
                 }
 
                 Spacer()
+
+                Button(action: {
+                    NSApp.setActivationPolicy(.regular)
+                    NSApp.activate(ignoringOtherApps: true)
+                    openWindow(id: "main")
+                }) {
+                    Image(systemName: "macwindow")
+                        .font(.caption)
+                }
+                .buttonStyle(.borderless)
+                .help("Open Control Panel Window")
 
                 // Live Status Pill
                 HStack(spacing: 5) {
