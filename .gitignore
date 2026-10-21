@@ -1,0 +1,8 @@
+.DS_Store
+/.build/
+/*.xcodeproj
+/*.xcworkspace
+xcuserdata/
+DerivedData/
+GlideFix.app/
+*.app
