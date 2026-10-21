@@ -4,12 +4,14 @@ import GlideFixCore
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // 1. Runtime Anti-Dylib Injection Enforcement
+        SecurityAuditor.enforceDyldEnvironmentSafety()
+
+        // 2. Kernel Anti-Tamper & Debugger Rejection
+        SecurityAuditor.denyDebuggerAttachment()
+
         let accessibility = AccessibilityManager.shared
         let eventTap = EventTapManager.shared
-        let shortcut = GlobalShortcutMonitor.shared
-
-        // Start listening for safety toggle shortcut (Cmd + Option + Shift + M)
-        shortcut.start()
 
         // Check accessibility permissions
         if accessibility.checkIsTrusted() {
@@ -17,16 +19,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             // Setup callback for when user grants permission in System Settings
             accessibility.onPermissionGranted = { [weak eventTap] in
-                NSLog("[GlideFix] Accessibility permission granted! Starting EventTap...")
                 _ = eventTap?.start()
             }
         }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        NSLog("[GlideFix] Application terminating. Cleaning up resources...")
         EventTapManager.shared.stop()
-        GlobalShortcutMonitor.shared.stop()
     }
 }
 

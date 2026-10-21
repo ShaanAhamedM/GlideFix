@@ -1,5 +1,6 @@
 import AppKit
 import CoreGraphics
+import Darwin
 import Foundation
 
 /// Decision outcome for an intercepted scroll event.
@@ -13,7 +14,8 @@ public enum EventHandlingDecision: Equatable {
 }
 
 /// CoreGraphics event tap manager for intercepting external mouse scroll wheels.
-public final class EventTapManager {
+/// Hardened with runtime mask assertions, circuit breaker safety, and strict zero-logging.
+public final class EventTapManager: ObservableObject {
     public static let shared = EventTapManager()
 
     private var machPort: CFMachPort?
@@ -23,17 +25,25 @@ public final class EventTapManager {
     public let interpolator: PhysicsInterpolator
     public let exclusionManager: AppExclusionManager
     public let settings: AppSettings
+    public let circuitBreaker: CircuitBreaker
 
     @Published public private(set) var isRunning: Bool = false
+    @Published public private(set) var isCircuitBreakerTripped: Bool = false
 
     public init(
         settings: AppSettings = .shared,
         interpolator: PhysicsInterpolator = PhysicsInterpolator(),
-        exclusionManager: AppExclusionManager = .shared
+        exclusionManager: AppExclusionManager = .shared,
+        circuitBreaker: CircuitBreaker = CircuitBreaker()
     ) {
         self.settings = settings
         self.interpolator = interpolator
         self.exclusionManager = exclusionManager
+        self.circuitBreaker = circuitBreaker
+
+        self.circuitBreaker.onTrip = { [weak self] in
+            self?.handleCircuitBreakerTrip()
+        }
     }
 
     deinit {
@@ -41,6 +51,7 @@ public final class EventTapManager {
     }
 
     /// Starts the CGEventTap on the main runloop in common modes.
+    /// Hardware-level mask validation guarantees no unauthorized event types are listened to.
     @discardableResult
     public func start() -> Bool {
         lock.lock()
@@ -50,8 +61,11 @@ public final class EventTapManager {
             return true
         }
 
+        // Strict Event-Mask Isolation: enforce exact scroll-wheel bit (0x400000)
+        let mask = SecurityAuditor.scrollWheelMask
+        SecurityAuditor.enforceEventMask(mask)
+
         let refcon = Unmanaged.passUnretained(self).toOpaque()
-        let mask = CGEventMask(1 << CGEventType.scrollWheel.rawValue)
 
         guard let tap = CGEvent.tapCreate(
             tap: .cghidEventTap,
@@ -61,7 +75,6 @@ public final class EventTapManager {
             callback: eventTapCallback,
             userInfo: refcon
         ) else {
-            NSLog("[GlideFix] CGEvent.tapCreate failed (check Accessibility permissions).")
             self.isRunning = false
             return false
         }
@@ -72,7 +85,8 @@ public final class EventTapManager {
         self.machPort = tap
         self.runLoopSource = source
         self.isRunning = true
-        NSLog("[GlideFix] Event tap successfully started.")
+        self.isCircuitBreakerTripped = false
+        self.circuitBreaker.reset()
         return true
     }
 
@@ -93,16 +107,22 @@ public final class EventTapManager {
 
         interpolator.stop()
         self.isRunning = false
-        NSLog("[GlideFix] Event tap stopped.")
     }
 
-    /// Watchdog recovery when tap is disabled by macOS due to timeouts or input events.
+    /// Watchdog recovery when tap is disabled by macOS due to timeouts or user input.
     public func recoverTap() {
         lock.lock()
         defer { lock.unlock() }
         if let port = machPort {
             CGEvent.tapEnable(tap: port, enable: true)
-            NSLog("[GlideFix] Watchdog: Re-enabled event tap after system timeout.")
+        }
+    }
+
+    private func handleCircuitBreakerTrip() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.stop()
+            self.isCircuitBreakerTripped = true
         }
     }
 
@@ -112,7 +132,8 @@ public final class EventTapManager {
     public static func evaluate(
         event: CGEvent,
         settings: SettingsSnapshot,
-        isExcluded: Bool
+        isExcluded: Bool,
+        isSecureInputActive: Bool = SecurityAuditor.isSecureInputActive()
     ) -> EventHandlingDecision {
         // 1. Synthetic event: Prevent infinite recursion loops
         if event.getIntegerValueField(.eventSourceUserData) == MagicTag.value {
@@ -124,13 +145,19 @@ public final class EventTapManager {
             return .passThroughUntouched
         }
 
-        // 3. Trackpad & Magic Mouse continuous events: Pass through untouched
+        // 3. Secure Event Input Guard:
+        // When user is entering credentials in secure dialogs, pass native events untouched
+        if isSecureInputActive {
+            return .passThroughUntouched
+        }
+
+        // 4. Trackpad & Magic Mouse continuous events: Pass through untouched
         let isContinuous = event.getIntegerValueField(.scrollWheelEventIsContinuous)
         if isContinuous != 0 {
             return .passThroughUntouched
         }
 
-        // 4. Extract discrete deltas
+        // 5. Extract discrete deltas
         let deltaY = event.getIntegerValueField(.scrollWheelEventDeltaAxis1)
         let deltaX = event.getIntegerValueField(.scrollWheelEventDeltaAxis2)
         let fixedPtY = event.getDoubleValueField(.scrollWheelEventFixedPtDeltaAxis1)
@@ -141,7 +168,7 @@ public final class EventTapManager {
             return .passThroughUntouched
         }
 
-        // 5. Excluded app check
+        // 6. Excluded app check
         if isExcluded {
             if settings.invertExternalScroll {
                 return .modifyAndPassThrough(
@@ -152,7 +179,7 @@ public final class EventTapManager {
             return .passThroughUntouched
         }
 
-        // 6. Smooth scrolling engine
+        // 7. Smooth scrolling engine
         if settings.smoothScrollingEnabled {
             var effectiveY = deltaY != 0 ? Double(deltaY) : fixedPtY
             var effectiveX = deltaX != 0 ? Double(deltaX) : fixedPtX
@@ -165,7 +192,7 @@ public final class EventTapManager {
             return .swallowAndFeedPhysics(deltaY: effectiveY, deltaX: effectiveX)
         }
 
-        // 7. Discrete only (Smooth scrolling disabled)
+        // 8. Discrete only (Smooth scrolling disabled)
         if settings.invertExternalScroll {
             return .modifyAndPassThrough(
                 invertedDeltaY: -deltaY,
@@ -177,7 +204,7 @@ public final class EventTapManager {
     }
 }
 
-// MARK: - C Callback
+// MARK: - C Callback with Circuit Breaker
 
 private func eventTapCallback(
     proxy: CGEventTapProxy,
@@ -185,11 +212,19 @@ private func eventTapCallback(
     event: CGEvent,
     refcon: UnsafeMutableRawPointer?
 ) -> Unmanaged<CGEvent>? {
+    let startTime = mach_absolute_time()
+
     guard let refcon = refcon else {
         return Unmanaged.passUnretained(event)
     }
 
     let manager = Unmanaged<EventTapManager>.fromOpaque(refcon).takeUnretainedValue()
+
+    defer {
+        let endTime = mach_absolute_time()
+        let elapsed = SecurityAuditor.elapsedNanoseconds(start: startTime, end: endTime)
+        manager.circuitBreaker.recordExecution(nanoseconds: elapsed)
+    }
 
     // 1. Watchdog Recovery on timeout / user input disable
     if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
@@ -222,11 +257,9 @@ private func eventTapCallback(
             dampingFactor: snapshot.dampingFactor,
             horizontalEnabled: snapshot.horizontalScrollSupport
         )
-        // Swallow discrete event
         return nil
 
     case .modifyAndPassThrough(let invY, let invX):
-        // Invert deltas in place
         event.setIntegerValueField(.scrollWheelEventDeltaAxis1, value: invY)
         event.setIntegerValueField(.scrollWheelEventDeltaAxis2, value: invX)
 

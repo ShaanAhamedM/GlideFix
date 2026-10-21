@@ -62,7 +62,7 @@ public struct MenuBarContentView: View {
                     Text("Master Engine")
                         .font(.body)
                         .fontWeight(.semibold)
-                    Text("Quick toggle anytime with ⌘⌥⇧M")
+                    Text("Enable or pause GlideFix scrolling")
                         .font(.caption2)
                         .foregroundColor(.secondary)
                 }
@@ -98,7 +98,7 @@ public struct MenuBarContentView: View {
             .toggleStyle(.switch)
             .disabled(!settings.isEnabled || !accessibility.isTrusted)
 
-            // Physics Tuning Controls (collapsible or shown when smooth scrolling is ON)
+            // Physics Tuning Controls
             if settings.smoothScrollingEnabled && settings.isEnabled && accessibility.isTrusted {
                 PhysicsControlsView()
             }
@@ -107,6 +107,9 @@ public struct MenuBarContentView: View {
             if settings.isEnabled && accessibility.isTrusted {
                 ExclusionListView()
             }
+
+            // Security & Kernel Hardening Live Telemetry Badge
+            SecurityTelemetryView()
 
             Divider()
 

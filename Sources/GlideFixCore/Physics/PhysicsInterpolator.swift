@@ -3,7 +3,7 @@ import Foundation
 import QuartzCore
 
 /// High-performance, 120Hz physics-based momentum scroll interpolator.
-/// Converts discrete notched wheel ticks into buttery-smooth pixel scrolls with exponential damping.
+/// Hardened against NaN propagation, infinite values, and integer overflows.
 public final class PhysicsInterpolator {
     public typealias ScrollEventEmitter = (Double, Double) -> Void
 
@@ -16,7 +16,7 @@ public final class PhysicsInterpolator {
     private var targetRemainingX: Double = 0.0
     private var fractionalAccumulatorY: Double = 0.0
     private var fractionalAccumulatorX: Double = 0.0
-    private var currentDampingFactor: Double = 0.88
+    private var currentDampingFactor: Double = AppSettings.defaultDampingFactor
     private var lastTickTime: TimeInterval = 0
 
     // Convergence threshold: below 0.5 pixels remaining, finish and suspend timer
@@ -38,7 +38,7 @@ public final class PhysicsInterpolator {
     }
 
     /// Feeds discrete notched delta values into the momentum accumulator asynchronously.
-    /// Returns immediately (< 5 microseconds), never blocking the event tap callback.
+    /// Input deltas are strictly verified for NaN and infinite bounds.
     public func feed(
         deltaY: Double,
         deltaX: Double,
@@ -46,6 +46,10 @@ public final class PhysicsInterpolator {
         dampingFactor: Double,
         horizontalEnabled: Bool
     ) {
+        guard !deltaY.isNaN && !deltaY.isInfinite, !deltaX.isNaN && !deltaX.isInfinite else {
+            return
+        }
+
         queue.async { [weak self] in
             self?.processFeed(
                 deltaY: deltaY,
@@ -56,14 +60,21 @@ public final class PhysicsInterpolator {
         }
     }
 
-    /// Internal logic for applying impulse with momentum acceleration and instant direction reversal.
+    /// Internal logic with strict bounds clamping and momentum acceleration.
     private func processFeed(
         deltaY: Double,
         deltaX: Double,
         stepSize: Double,
         dampingFactor: Double
     ) {
-        self.currentDampingFactor = max(0.50, min(0.98, dampingFactor))
+        guard !deltaY.isNaN && !deltaY.isInfinite, !deltaX.isNaN && !deltaX.isInfinite else {
+            return
+        }
+
+        let safeStep = AppSettings.sanitizeStepSize(stepSize)
+        let safeDamping = AppSettings.sanitizeDampingFactor(dampingFactor)
+        self.currentDampingFactor = safeDamping
+
         let now = CACurrentMediaTime()
         let elapsed = now - lastTickTime
         lastTickTime = now
@@ -71,14 +82,13 @@ public final class PhysicsInterpolator {
         // Calculate velocity multiplier for rapid flicks (momentum acceleration)
         let speedMultiplier: Double
         if elapsed < 0.08 && elapsed > 0.001 {
-            // Consecutive ticks within 80ms boost velocity up to 2.2x
             speedMultiplier = min(2.2, 1.0 + (0.08 - elapsed) * 15.0)
         } else {
             speedMultiplier = 1.0
         }
 
-        let impulseY = deltaY * stepSize * speedMultiplier
-        let impulseX = deltaX * stepSize * speedMultiplier
+        let impulseY = deltaY * safeStep * speedMultiplier
+        let impulseX = deltaX * safeStep * speedMultiplier
 
         // Instant directional reversal: if user scrolls in opposite direction, cancel prior momentum
         if (impulseY > 0 && targetRemainingY < 0) || (impulseY < 0 && targetRemainingY > 0) {
@@ -90,10 +100,11 @@ public final class PhysicsInterpolator {
             fractionalAccumulatorX = 0.0
         }
 
-        targetRemainingY += impulseY
-        targetRemainingX += impulseX
+        // Apply impulse and clamp to max displacement cap (prevents integer overflow)
+        let cap = AppSettings.maxDisplacementCap
+        targetRemainingY = max(-cap, min(cap, targetRemainingY + impulseY))
+        targetRemainingX = max(-cap, min(cap, targetRemainingX + impulseX))
 
-        // Ensure the 120Hz timer is active
         startTimerIfNeeded()
     }
 
@@ -195,28 +206,24 @@ public final class PhysicsInterpolator {
 
     // MARK: - Testing Helpers
 
-    /// Synchronously steps physics by one frame. For unit testing.
     public func testStep() {
         queue.sync {
             self.tick()
         }
     }
 
-    /// Feeds an impulse synchronously for deterministic testing.
     public func testFeed(deltaY: Double, deltaX: Double, stepSize: Double, dampingFactor: Double) {
         queue.sync {
             self.processFeed(deltaY: deltaY, deltaX: deltaX, stepSize: stepSize, dampingFactor: dampingFactor)
         }
     }
 
-    /// Inspects whether the timer is currently active. For unit testing.
     public var isRunning: Bool {
         queue.sync {
             timer != nil
         }
     }
 
-    /// Remaining displacement for testing.
     public var testRemainingDisplacement: (Double, Double) {
         queue.sync {
             (self.targetRemainingY, self.targetRemainingX)

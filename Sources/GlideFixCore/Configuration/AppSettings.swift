@@ -24,16 +24,47 @@ public struct SettingsSnapshot: Sendable, Equatable {
         self.isEnabled = isEnabled
         self.invertExternalScroll = invertExternalScroll
         self.smoothScrollingEnabled = smoothScrollingEnabled
-        self.stepSize = stepSize
-        self.dampingFactor = dampingFactor
+        self.stepSize = AppSettings.sanitizeStepSize(stepSize)
+        self.dampingFactor = AppSettings.sanitizeDampingFactor(dampingFactor)
         self.horizontalScrollSupport = horizontalScrollSupport
         self.excludedBundleIDs = excludedBundleIDs
     }
 }
 
 /// Observable application settings backed by UserDefaults and providing synchronized snapshots.
+/// Strictly sanitized against NaN, infinity, and out-of-bounds tampering.
 public final class AppSettings: ObservableObject {
     public static let shared = AppSettings()
+
+    // Bounds constants
+    public static let minStepSize: Double = 5.0
+    public static let maxStepSize: Double = 150.0
+    public static let defaultStepSize: Double = 45.0
+
+    public static let minDampingFactor: Double = 0.50
+    public static let maxDampingFactor: Double = 0.98
+    public static let defaultDampingFactor: Double = 0.88
+
+    public static let minDisplacementCap: Double = 100.0
+    public static let maxDisplacementCap: Double = 2500.0
+    public static let defaultDisplacementCap: Double = 2500.0
+
+    // MARK: - Bounds Sanitizers
+
+    public static func sanitizeStepSize(_ value: Double) -> Double {
+        guard !value.isNaN && !value.isInfinite else { return defaultStepSize }
+        return max(minStepSize, min(maxStepSize, value))
+    }
+
+    public static func sanitizeDampingFactor(_ value: Double) -> Double {
+        guard !value.isNaN && !value.isInfinite else { return defaultDampingFactor }
+        return max(minDampingFactor, min(maxDampingFactor, value))
+    }
+
+    public static func sanitizeDisplacementCap(_ value: Double) -> Double {
+        guard !value.isNaN && !value.isInfinite else { return defaultDisplacementCap }
+        return max(minDisplacementCap, min(maxDisplacementCap, value))
+    }
 
     private enum Keys {
         static let isEnabled = "com.glidefix.isEnabled"
@@ -72,6 +103,11 @@ public final class AppSettings: ObservableObject {
 
     @Published public var stepSize: Double {
         didSet {
+            let sanitized = AppSettings.sanitizeStepSize(stepSize)
+            if sanitized != stepSize {
+                stepSize = sanitized
+                return
+            }
             defaults.set(stepSize, forKey: Keys.stepSize)
             updateCachedSnapshot()
         }
@@ -79,6 +115,11 @@ public final class AppSettings: ObservableObject {
 
     @Published public var dampingFactor: Double {
         didSet {
+            let sanitized = AppSettings.sanitizeDampingFactor(dampingFactor)
+            if sanitized != dampingFactor {
+                dampingFactor = sanitized
+                return
+            }
             defaults.set(dampingFactor, forKey: Keys.dampingFactor)
             updateCachedSnapshot()
         }
@@ -112,8 +153,8 @@ public final class AppSettings: ObservableObject {
             Keys.isEnabled: true,
             Keys.invertExternalScroll: true,
             Keys.smoothScrollingEnabled: true,
-            Keys.stepSize: 45.0,
-            Keys.dampingFactor: 0.88,
+            Keys.stepSize: AppSettings.defaultStepSize,
+            Keys.dampingFactor: AppSettings.defaultDampingFactor,
             Keys.horizontalScrollSupport: true,
             Keys.excludedBundleIDs: []
         ])
@@ -121,8 +162,8 @@ public final class AppSettings: ObservableObject {
         let enabled = defaults.bool(forKey: Keys.isEnabled)
         let invert = defaults.bool(forKey: Keys.invertExternalScroll)
         let smooth = defaults.bool(forKey: Keys.smoothScrollingEnabled)
-        let step = defaults.double(forKey: Keys.stepSize) > 0 ? defaults.double(forKey: Keys.stepSize) : 45.0
-        let damp = defaults.double(forKey: Keys.dampingFactor) > 0 ? defaults.double(forKey: Keys.dampingFactor) : 0.88
+        let step = AppSettings.sanitizeStepSize(defaults.double(forKey: Keys.stepSize))
+        let damp = AppSettings.sanitizeDampingFactor(defaults.double(forKey: Keys.dampingFactor))
         let horiz = defaults.bool(forKey: Keys.horizontalScrollSupport)
         let excluded = defaults.stringArray(forKey: Keys.excludedBundleIDs) ?? []
 
@@ -183,8 +224,8 @@ public final class AppSettings: ObservableObject {
         isEnabled = true
         invertExternalScroll = true
         smoothScrollingEnabled = true
-        stepSize = 45.0
-        dampingFactor = 0.88
+        stepSize = AppSettings.defaultStepSize
+        dampingFactor = AppSettings.defaultDampingFactor
         horizontalScrollSupport = true
     }
 
@@ -200,7 +241,7 @@ public final class AppSettings: ObservableObject {
                 }
             }
         } catch {
-            NSLog("[GlideFix] Failed to set launch at login: \(error)")
+            // Strict zero-logging: error discarded
         }
     }
 }
