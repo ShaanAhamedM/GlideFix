@@ -28,7 +28,7 @@ chmod +x "$MACOS_DIR/GlideFix"
 cp "$PROJECT_DIR/Sources/GlideFixApp/Resources/Info.plist" "$CONTENTS_DIR/Info.plist"
 
 echo "=== [3/5] Applying Hardened Runtime & Signing with Entitlements ==="
-codesign --force --deep --options runtime --entitlements "$ENTITLEMENTS" --sign - "$APP_BUNDLE"
+codesign --force --deep --options runtime --entitlements "$ENTITLEMENTS" -r='designated => identifier "com.glidefix.GlideFix"' --sign - "$APP_BUNDLE"
 
 echo "=== [4/5] Cryptographic & Entitlements Verification ==="
 codesign -dvvv --entitlements - "$APP_BUNDLE"
